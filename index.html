@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oura Research Study Intake</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #F4F7FB; }
+  input, textarea, select, button { font-family: inherit; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #F4F7FB; }
+  ::-webkit-scrollbar-thumb { background: #D1DCE8; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState } = React;
+
+// ─── CONFIGURATION — update APPS_SCRIPT_URL after deploying the backend ───────
+// See AppsScript_Backend.gs for instructions. Once deployed, paste your
+// web app URL here:
+const APPS_SCRIPT_URL = "YOUR_APPS_SCRIPT_WEB_APP_URL_HERE";
+const JIRA_EPIC = "SCIE-5201";
+const DRIVE_FOLDER_NAME = "Test ROPs SI Protocols";
+
+// ─── Scoring ──────────────────────────────────────────────────────────────────
+function scoreHSRC(a) {
+  const triggers = [];
+  if (a.primaryPurpose?.includes("publication")) triggers.push({ label: "Scientific publication / generalizable knowledge intent", sev: "high" });
+  if (a.primaryPurpose?.includes("regulatory")) triggers.push({ label: "Clinical or regulatory evidence (FDA, CE Mark, or hardware equivalence)", sev: "high" });
+  if (a.primaryPurpose?.includes("marketing")) triggers.push({ label: "External claims or marketing substantiation", sev: "high" });
+  if (a.regulatoryEvidence === "yes" || a.regulatoryEvidence === "unsure") triggers.push({ label: "Results may support regulatory submission or demonstrate HW equivalence — even if uncertain", sev: "high" });
+  if (a.externalDataSharing === "yes" || a.externalDataSharing === "unsure") triggers.push({ label: "Data shared outside Oura (academic collaborators, CROs, vendors, partners)", sev: "medium" });
+  if (a.formalStats === "yes") triggers.push({ label: "Formal hypotheses, pre-specified SAP, blinding, or randomization", sev: "medium" });
+  if (a.algValidation === "yes") triggers.push({ label: "Algorithm or model validation intended to inform health-related end-user decisions", sev: "medium" });
+  if (a.activitiesBeyondNormal === "yes" || a.activitiesBeyondNormal === "unsure") triggers.push({ label: "Activities beyond standard product use (exercise, sleep restriction, fasting, dietary abstention, etc.)", sev: "medium" });
+  if (a.preVisitRequirements === "yes") triggers.push({ label: "Pre-visit physiological requirements (fasting, substance abstention, etc.)", sev: "medium" });
+  if (a.dxaOrRadiation === "yes") triggers.push({ label: "Radiation-emitting procedures — greater-than-minimal risk", sev: "high" });
+  if (a.greaterThanMinimalRisk === "yes" || a.greaterThanMinimalRisk === "unsure") triggers.push({ label: "Greater-than-minimal risk (physical, psychological, informational, or reputational)", sev: "high" });
+  if (a.sensitiveData === "yes" || a.sensitiveData === "unsure") triggers.push({ label: "Sensitive data collected (diagnoses, medications, mental health, reproductive health)", sev: "medium" });
+  if (a.vulnerablePopulations?.some(p => p !== "adults18plus")) triggers.push({ label: "Vulnerable or protected participant populations", sev: "high" });
+  if (a.externalPartners === "yes") triggers.push({ label: "External partner(s), CRO, or non-Oura site involved", sev: "medium" });
+  const n = parseInt(a.sampleSize) || 0;
+  const highTriggers = triggers.filter(t => t.sev === "high");
+  const anyTriggers = triggers.length > 0;
+  let tier = 1;
+  if (highTriggers.some(t => t.label.includes("regulatory") || t.label.includes("Radiation"))) tier = 4;
+  else if (highTriggers.length > 0 || a.externalPartners === "yes") tier = 3;
+  else if (anyTriggers || n > 20 || a.ouraDevices?.includes("prototype") || a.algValidation === "yes") tier = 2;
+  else if (n <= 20 && !anyTriggers) tier = 1;
+  const irbRequired = triggers.some(t => t.sev === "high") || a.primaryPurpose?.some(p => ["publication","regulatory","marketing"].includes(p));
+  const irbLikely = !irbRequired && triggers.length > 0;
+  let studyPath = "Oura independently-run internal study";
+  if (tier === 4) studyPath = "CRO-path or clinical study (Tier 4) — WCG or Advarra IRB preferred";
+  else if (a.externalPartners === "yes" && tier === 3) studyPath = "Oura–Partner Joint Study (Tier 3)";
+  else if (a.primaryPurpose?.includes("hwfw") && tier <= 2) studyPath = "HW/FW R&D Study (Tier 1–2)";
+  return { tier, triggers, irbRequired, irbLikely, studyPath };
+}
+
+const TIERS = {
+  1: { label: "Tier 1 — Bench Testing / Feasibility", color: "#4CAF7D", bg: "#F0FAF4", border: "#4CAF7D", pages: "2–5 pages", hsrc: "Recommended" },
+  2: { label: "Tier 2 — Algorithm Dev / HW/FW R&D", color: "#2E86C1", bg: "#EBF5FB", border: "#2E86C1", pages: "5–15 pages", hsrc: "Required" },
+  3: { label: "Tier 3 — Partner / External Study", color: "#7D3C98", bg: "#F5EEF8", border: "#7D3C98", pages: "15–30 pages", hsrc: "Required" },
+  4: { label: "Tier 4 — Clinical / Regulatory (CIP)", color: "#C0392B", bg: "#FDEDEC", border: "#C0392B", pages: "30–55 pages", hsrc: "Required" },
+};
+
+// ─── Submission — calls the Apps Script backend ───────────────────────────────
+async function submitIntake(answers, scoring) {
+  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL === "YOUR_APPS_SCRIPT_WEB_APP_URL_HERE") {
+    throw new Error("APPS_SCRIPT_URL not configured. See setup instructions.");
+  }
+  const payload = { answers, scoring: {
+    tier: scoring.tier,
+    tierLabel: TIERS[scoring.tier].label,
+    irbRequired: scoring.irbRequired,
+    irbLikely: scoring.irbLikely,
+    studyPath: scoring.studyPath,
+    triggers: scoring.triggers.map(t => t.label),
+    tierPages: TIERS[scoring.tier].pages,
+    tierHsrc: TIERS[scoring.tier].hsrc,
+  }};
+  const res = await fetch(APPS_SCRIPT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Backend error: ${res.status}`);
+  return await res.json();
+}
+
+// ─── UI primitives ────────────────────────────────────────────────────────────
+const iBase = { width:"100%", padding:"9px 13px", border:"1.5px solid #E2E8F0", borderRadius:8, fontSize:14, color:"#1A2E4A", background:"#FAFBFC", outline:"none", fontFamily:"inherit", boxSizing:"border-box", transition:"border-color 0.15s" };
+const fo = e => e.target.style.borderColor = "#1A6FA8";
+const fb = e => e.target.style.borderColor = "#E2E8F0";
+
+const TI = ({value,onChange,placeholder,type="text"}) => <input type={type} value={value||""} placeholder={placeholder} onChange={e=>onChange(e.target.value)} style={iBase} onFocus={fo} onBlur={fb}/>;
+const TA = ({value,onChange,placeholder,rows=3}) => <textarea value={value||""} placeholder={placeholder} rows={rows} onChange={e=>onChange(e.target.value)} style={{...iBase,resize:"vertical",lineHeight:1.6}} onFocus={fo} onBlur={fb}/>;
+const Sel = ({value,onChange,options}) => (
+  <select value={value||""} onChange={e=>onChange(e.target.value)} style={{...iBase,cursor:"pointer"}} onFocus={fo} onBlur={fb}>
+    <option value="">— Select —</option>
+    {options.map(o=><option key={o.value||o} value={o.value||o}>{o.label||o}</option>)}
+  </select>
+);
+const Chips = ({options,value=[],onChange}) => {
+  const toggle = k => onChange(value.includes(k)?value.filter(x=>x!==k):[...value,k]);
+  return (
+    <div style={{display:"flex",flexWrap:"wrap",gap:7,marginTop:6}}>
+      {options.map(o=>{const k=o.value||o;const on=value.includes(k);return(
+        <button key={k} onClick={()=>toggle(k)} style={{padding:"6px 12px",borderRadius:20,fontSize:12,fontWeight:500,cursor:"pointer",border:on?"1.5px solid #1A6FA8":"1.5px solid #D1DCE8",background:on?"#EBF5FB":"#F8FAFC",color:on?"#1A6FA8":"#5A7184",transition:"all 0.1s"}}>{o.label||o}</button>
+      );})}
+    </div>
+  );
+};
+const YNU = ({value,onChange,unsure=true}) => (
+  <div style={{display:"flex",gap:8,marginTop:6}}>
+    {(unsure?["yes","no","unsure"]:["yes","no"]).map(o=>(
+      <button key={o} onClick={()=>onChange(o)} style={{padding:"6px 18px",borderRadius:8,fontSize:13,fontWeight:600,cursor:"pointer",border:value===o?"2px solid #1A6FA8":"2px solid #E2E8F0",background:value===o?"#EBF5FB":"#FAFBFC",color:value===o?"#1A6FA8":"#8AA0B0",transition:"all 0.1s"}}>{o==="unsure"?"Unsure":o==="yes"?"Yes":"No"}</button>
+    ))}
+  </div>
+);
+const F = ({label,sub,children,req}) => (
+  <div style={{marginBottom:20}}>
+    <div style={{fontSize:12,fontWeight:700,color:"#4A6578",letterSpacing:"0.05em",textTransform:"uppercase",marginBottom:sub?2:5}}>{label}{req&&<span style={{color:"#C0392B",marginLeft:3}}>*</span>}</div>
+    {sub&&<div style={{fontSize:12,color:"#8AA0B0",marginBottom:5,fontStyle:"italic"}}>{sub}</div>}
+    {children}
+  </div>
+);
+const ABox = ({color="#E67E22",children,sm}) => (
+  <div style={{background:color+"10",border:`1px solid ${color}44`,borderLeft:`3px solid ${color}`,borderRadius:8,padding:sm?"8px 12px":"10px 14px",marginTop:8,fontSize:13,color:"#1A2E4A",lineHeight:1.5}}>{children}</div>
+);
+const Tag = ({label,color}) => (
+  <span style={{display:"inline-flex",alignItems:"center",padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:600,letterSpacing:"0.05em",background:color+"22",color,border:`1px solid ${color}55`}}>{label}</span>
+);
+const HR = () => <div style={{borderTop:"1px solid #EEF2F7",margin:"4px 0 18px"}}/>;
+
+// ─── Steps ────────────────────────────────────────────────────────────────────
+function Step1({a,set}) {
+  return <>
+    <F label="Study title" req><TI value={a.studyTitle} onChange={v=>set("studyTitle",v)} placeholder="e.g. Sleep Apnea Risk Overnight Validation"/></F>
+    <F label="DRI (directly responsible individual)" req sub="Name and role — may be Research Ops, Health Science, Clinical Affairs, Sensing, or other team"><TI value={a.dri} onChange={v=>set("dri",v)} placeholder="e.g. Emma Beisheim-Ryan, Senior Research Scientist"/></F>
+    <F label="Department / team" req><TI value={a.department} onChange={v=>set("department",v)} placeholder="e.g. Health Science, Sensing, Clinical Affairs, Research Ops"/></F>
+    <F label="Program / product line"><TI value={a.program} onChange={v=>set("program",v)} placeholder="e.g. Sleep, Body Composition, Activity, Sensing, Member Experience"/></F>
+    <F label="Anticipated number of study sites"><Sel value={a.numSites} onChange={v=>set("numSites",v)} options={["1 (single site)","2–3 sites","4+ sites","Not yet determined"]}/></F>
+  </>;
+}
+
+function Step2({a,set}) {
+  const purposeOpts=[{value:"internal",label:"Internal insights only (no external use)"},{value:"algdev",label:"Algorithm development or training"},{value:"algval",label:"Algorithm validation"},{value:"hwfw",label:"HW/FW R&D / bench testing"},{value:"publication",label:"Scientific publication"},{value:"regulatory",label:"Clinical / regulatory evidence (FDA or CE submission)"},{value:"marketing",label:"Marketing or external claims support"}];
+  const showExt=a.primaryPurpose?.some(p=>["publication","regulatory","marketing"].includes(p));
+  return <>
+    <F label="Study overview" req sub="1–2 sentences: what will participants do, and what is Oura trying to learn?">
+      <TA value={a.studyOverview} onChange={v=>set("studyOverview",v)} placeholder="e.g. Participants will wear Oura Ring devices during a controlled lab session. Oura is evaluating algorithm accuracy against a reference standard."/>
+    </F>
+    <F label="Primary purpose" sub="Select all that apply — drives HSRC trigger scoring">
+      <Chips options={purposeOpts} value={a.primaryPurpose||[]} onChange={v=>set("primaryPurpose",v)}/>
+    </F>
+    {showExt&&<F label="External claims or research intent" sub="Describe how results will be shared, published, or used in submissions"><TA value={a.externalClaimsDesc} onChange={v=>set("externalClaimsDesc",v)} placeholder="e.g. Data may support a regulatory submission. Internal performance targets remain confidential."/></F>}
+  </>;
+}
+
+function Step3({a,set}) {
+  const isLong=a.studyDesign?.includes("ongitudinal");
+  const isSleep=a.studyType?.includes("leep");
+  return <>
+    <F label="Study design"><Sel value={a.studyDesign} onChange={v=>set("studyDesign",v)} options={["Observational cross-sectional (single visit)","Observational longitudinal / cohort (multi-visit)","Bench / lab testing (no participants)","Algorithm development (internal data only)","Interventional","Other — describe in notes"]}/></F>
+    {isLong&&<F label="Visit schedule / follow-up duration" sub="Number of visits, cadence, and duration per visit"><TI value={a.visitDetails} onChange={v=>set("visitDetails",v)} placeholder="e.g. 9 weekly visits over 8 weeks; ~60 min each"/></F>}
+    <F label="Primary study type" sub="Used to surface relevant IRB triggers and protocol fields">
+      <Sel value={a.studyType} onChange={v=>set("studyType",v)} options={["Hardware development / bench testing","Firmware / signal development","Algorithm training (no clinical endpoint)","Algorithm validation","Regulated feature development","Movement / activity feature development","Sleep feature development or validation","Physiological sensing (non-movement)","Multi-metric or platform validation","Clinical or regulatory validation","Dogfooding / internal feature testing","Consumer insights / UX research","Other"]}/>
+    </F>
+    <F label="Sample audience" sub="Brief description of who will participate"><TI value={a.sampleAudience} onChange={v=>set("sampleAudience",v)} placeholder="e.g. Healthy adults 18–85, general public or clinic-referred"/></F>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 16px"}}>
+      <F label="Target sample size"><TI value={a.sampleSize} onChange={v=>set("sampleSize",v)} type="number" placeholder="e.g. 100"/></F>
+      <F label="Country / countries"><TI value={a.countries} onChange={v=>set("countries",v)} placeholder="e.g. USA"/></F>
+    </div>
+    {a.sampleSize&&parseInt(a.sampleSize)>0&&<F label="Sample size justification" sub="Brief power analysis or rationale (required for Tier 2+)"><TA value={a.sampleSizeJustification} onChange={v=>set("sampleSizeJustification",v)} rows={2} placeholder="e.g. N=100 based on prior study precision; targets designed to support subgroup analyses across key demographic groups"/></F>}
+    <HR/>
+    <F label="Oura devices to be worn" sub="Select all that apply">
+      <Chips options={[{value:"production",label:"Production ring"},{value:"prototype",label:"Prototype ring"},{value:"none",label:"Sensor module only (no full ring)"}]} value={a.ouraDevices||[]} onChange={v=>set("ouraDevices",v)}/>
+      {a.ouraDevices?.includes("prototype")&&<div style={{marginTop:10}}><div style={{fontSize:12,color:"#5A7184",marginBottom:5}}>Specify prototype details (model, firmware build, etc.)</div><TI value={a.prototypeDetails} onChange={v=>set("prototypeDetails",v)} placeholder="e.g. Pre-release hardware variant; firmware build TBD"/><ABox color="#7D3C98" sm>Prototype rings require chain-of-custody inventory log, locked/camera-monitored storage, and product secrecy briefing for all participants and staff.</ABox></div>}
+    </F>
+    <F label="Reference / comparator devices included?">
+      <YNU value={a.referenceDevices} onChange={v=>set("referenceDevices",v)}/>
+      {(a.referenceDevices==="yes"||a.referenceDevices==="unsure")&&<div style={{marginTop:10}}><div style={{fontSize:12,color:"#5A7184",marginBottom:5}}>List reference devices</div><TA value={a.referenceDeviceDetails} onChange={v=>set("referenceDeviceDetails",v)} rows={2} placeholder="e.g. Medical-grade reference system for primary metric; consumer device for secondary comparison"/></div>}
+    </F>
+    {isSleep&&<F label="Informed consent modality" sub="WCG IRB has required wet ink signatures for Oura clinical studies — confirm with site before submission"><Sel value={a.consentModality} onChange={v=>set("consentModality",v)} options={["Wet signature (pen and paper) — required for clinical sites","Electronic / digital signature","TBD — confirm with site and IRB"]}/>{a.consentModality?.includes("lectronic")&&<ABox color="#E67E22" sm>WCG IRB has previously required protocol amendments when consent modality didn't match the submission. Confirm with site before submitting.</ABox>}</F>}
+    <F label="Special protocol configurations" sub="Select all that apply">
+      <Chips options={[{value:"multiRing",label:"Multiple rings per participant"},{value:"multiProtocol",label:"Multiple sub-protocols or conditions"},{value:"counterbalanced",label:"Counterbalanced device assignment"},{value:"structuredTask",label:"Structured task or activity protocol"},{value:"labControlled",label:"Lab-controlled environmental conditions"},{value:"clinicalEquipment",label:"Clinical or medical-grade equipment involved"},{value:"bodyMeasurements",label:"Anthropometric measurements"},{value:"vitalSigns",label:"Vital signs collection"}]} value={a.specialConfig||[]} onChange={v=>set("specialConfig",v)}/>
+    </F>
+    <F label="Skin tone assessment methodology" sub="Both scales are collected in Oura studies per CRF standards">
+      <Chips options={[{value:"fitzpatrick",label:"Fitzpatrick Scale (dorsal + ventral)"},{value:"monk",label:"Monk Skin Tone Scale (dorsal + ventral)"},{value:"both",label:"Both Fitzpatrick and Monk"},{value:"na",label:"Not applicable for this study"}]} value={a.skinToneMethod||[]} onChange={v=>set("skinToneMethod",v)}/>
+    </F>
+  </>;
+}
+
+function Step4({a,set}) {
+  const popOpts=[{value:"adults18plus",label:"Adults 18+ only"},{value:"minors",label:"Minors (<18)"},{value:"pregnant",label:"Pregnant people"},{value:"vulnerable",label:"Other protected / vulnerable populations"},{value:"employees",label:"Oura employees / interns / contractors"}];
+  const hasVulnerable=a.vulnerablePopulations?.some(p=>p!=="adults18plus");
+  const hasEmployees=a.vulnerablePopulations?.includes("employees");
+  const cohortOpts=[{value:"clinicalCondition",label:"Participants with a specific clinical condition or diagnosis"},{value:"highPerformance",label:"High-performance or athletic population"},{value:"activeIntervention",label:"Participants undergoing an active health intervention"},{value:"hormonal",label:"Specific hormonal or reproductive health status"},{value:"older",label:"Older adults (65+)"},{value:"none",label:"No special cohorts"}];
+  return <>
+    <div style={{background:"#F4F7FB",borderRadius:10,padding:"10px 14px",marginBottom:18,fontSize:13,color:"#5A7184",lineHeight:1.5}}>Your answers auto-score IRB triggers on the next screen. Additional fields appear when you select Yes or Unsure.</div>
+    <F label="Study population" sub="Select all that apply">
+      <Chips options={popOpts} value={a.vulnerablePopulations||[]} onChange={v=>set("vulnerablePopulations",v)}/>
+      {hasEmployees&&<ABox color="#E67E22">Studies involving Oura employees, interns, or contractors are subject to the Internal Testing Policy and require HSRC review. Direct reporting relationships create voluntary consent concerns — an IRB trigger.</ABox>}
+      {hasVulnerable&&!hasEmployees&&<ABox color="#C0392B">Including minors, pregnant people, or other protected populations is an IRB trigger.<div style={{marginTop:8}}><TA value={a.vulnerableDetail} onChange={v=>set("vulnerableDetail",v)} rows={2} placeholder="Describe the population and additional protections planned"/></div></ABox>}
+    </F>
+    <F label="Special inclusion cohorts" sub="Select planned sub-cohorts if applicable">
+      <Chips options={cohortOpts} value={a.specialCohorts||[]} onChange={v=>set("specialCohorts",v)}/>
+      {a.specialCohorts?.includes("clinicalCondition")&&<div style={{fontSize:12,color:"#8AA0B0",marginTop:6,fontStyle:"italic"}}>Describe the condition and any screening / safety considerations in the notes field on Step 3.</div>}
+      {a.specialCohorts?.includes("activeIntervention")&&<div style={{fontSize:12,color:"#8AA0B0",marginTop:6,fontStyle:"italic"}}>Active health interventions may require additional safety screening or PI evaluation for eligibility.</div>}
+    </F>
+    <F label="Sensitive data collected?" sub="Medical diagnoses, lab results, medications, mental health, reproductive health"><YNU value={a.sensitiveData} onChange={v=>set("sensitiveData",v)}/>{(a.sensitiveData==="yes"||a.sensitiveData==="unsure")&&<ABox color="#E67E22">Sensitive data collection is an IRB trigger.<div style={{marginTop:8}}><TA value={a.sensitiveDataDetail} onChange={v=>set("sensitiveDataDetail",v)} rows={2} placeholder="e.g. Medical history, current medications, mental health questionnaires, reproductive health status, clinical diagnoses"/></div></ABox>}</F>
+    <F label="Activities beyond everyday product use?" sub="Structured exercise, sleep restriction, hypoxia, fasting, dietary interventions, medication changes, or other interventions"><YNU value={a.activitiesBeyondNormal} onChange={v=>set("activitiesBeyondNormal",v)}/>{(a.activitiesBeyondNormal==="yes"||a.activitiesBeyondNormal==="unsure")&&<ABox color="#E67E22">Activities beyond standard product use is an IRB trigger.<div style={{marginTop:8}}><TA value={a.activitiesDetail} onChange={v=>set("activitiesDetail",v)} rows={2} placeholder="e.g. Structured exercise protocol, sleep restriction, fasting, dietary restrictions, medication changes"/></div></ABox>}</F>
+    <F label="Pre-visit physiological requirements?" sub="Fasting, substance abstention, or other restrictions required before visits"><YNU value={a.preVisitRequirements} onChange={v=>set("preVisitRequirements",v)} unsure={false}/>{a.preVisitRequirements==="yes"&&<div style={{marginTop:8}}><TA value={a.preVisitDetail} onChange={v=>set("preVisitDetail",v)} rows={2} placeholder="e.g. Abstain from substances ≥8 hours before visit; fast ≥8 hours; specify timing and medical exclusions"/><ABox color="#E67E22" sm>Pre-visit physiological restrictions count as interventions — IRB trigger. Document medical exclusions for at-risk participants.</ABox></div>}</F>
+    <F label="Radiation-emitting procedures?" sub="e.g. DXA scanning or other radiation-emitting clinical equipment"><YNU value={a.dxaOrRadiation} onChange={v=>set("dxaOrRadiation",v)} unsure={false}/>{a.dxaOrRadiation==="yes"&&<ABox color="#C0392B" sm>Radiation exposure is a greater-than-minimal risk IRB trigger. Requires contraindication screening. Confirm calibration SOPs with partner site.</ABox>}</F>
+    <F label="Results may support a regulatory submission or demonstrate hardware equivalence?" sub="Includes FDA De Novo, 510(k), CE Mark, or any context where the feature may later be submitted — select Yes or Unsure if any possibility exists"><YNU value={a.regulatoryEvidence} onChange={v=>set("regulatoryEvidence",v)}/>{(a.regulatoryEvidence==="yes"||a.regulatoryEvidence==="unsure")&&<ABox color="#C0392B">Regulatory evidence intent — even if uncertain — requires an IRB-reviewable study design. WCG or Advarra preferred for FDA-adjacent studies.<div style={{marginTop:8}}><TA value={a.regulatoryDetail} onChange={v=>set("regulatoryDetail",v)} rows={2} placeholder="Describe the regulatory pathway or context (e.g. De Novo, 510(k), CE Mark, hardware equivalence)"/></div></ABox>}</F>
+    <F label="Algorithm or model validation intended to inform health-related end-user decisions?" sub="Validating any algorithm, AI system, or scoring model that outputs a health-relevant signal to end users"><YNU value={a.algValidation} onChange={v=>set("algValidation",v)}/>{a.algValidation==="yes"&&<ABox color="#E67E22" sm>Algorithm validation for health-related end-user decisions is an IRB trigger under Oura's Internal Testing Policy.</ABox>}</F>
+    <F label="Formal statistical methods, pre-specified hypotheses, or blinded / randomized design?" sub="SAP, defined endpoints, control groups, randomization — indicates intent to produce generalizable knowledge"><YNU value={a.formalStats} onChange={v=>set("formalStats",v)}/>{a.formalStats==="yes"&&<div style={{fontSize:12,color:"#8AA0B0",marginTop:6,fontStyle:"italic"}}>SAP must be finalized before analysis begins for Tier 3–4 studies. Database lock precedes primary analysis.</div>}</F>
+    <F label="Intent to share data outside Oura?" sub="Academic collaborators, partner institutions, CROs, vendors"><YNU value={a.externalDataSharing} onChange={v=>set("externalDataSharing",v)}/>{(a.externalDataSharing==="yes"||a.externalDataSharing==="unsure")&&<div style={{marginTop:8}}><TA value={a.externalDataDetail} onChange={v=>set("externalDataDetail",v)} rows={2} placeholder="Describe who will receive data, under what agreement (e.g. DUA, MCA), and de-identification standards"/></div>}</F>
+    <F label="External partners involved?" sub="Non-Oura sites, CROs, academic institutions, clinical or research facilities"><YNU value={a.externalPartners} onChange={v=>set("externalPartners",v)} unsure={false}/>{a.externalPartners==="yes"&&<div style={{marginTop:8}}><TI value={a.externalPartnerDetail} onChange={v=>set("externalPartnerDetail",v)} placeholder="e.g. Partner institution name, city, and PI/contact"/></div>}</F>
+    <F label="Risk level — any risk greater than minimal?" sub="Physical, psychological, informational, or reputational risk beyond everyday Oura product use"><YNU value={a.greaterThanMinimalRisk} onChange={v=>set("greaterThanMinimalRisk",v)}/>{(a.greaterThanMinimalRisk==="yes"||a.greaterThanMinimalRisk==="unsure")&&<ABox color="#C0392B">Greater-than-minimal risk is an IRB trigger.<div style={{marginTop:8}}><TA value={a.riskDetail} onChange={v=>set("riskDetail",v)} rows={2} placeholder="Describe the nature of the risk and planned mitigations"/></div></ABox>}</F>
+    <F label="IP concerns or special agreement terms?" sub="Prototype secrecy, custom MCA/SOW terms, IP ownership of derived algorithms"><YNU value={a.ipConcerns} onChange={v=>set("ipConcerns",v)} unsure={false}/>{a.ipConcerns==="yes"&&<div style={{marginTop:8}}><TA value={a.ipDetail} onChange={v=>set("ipDetail",v)} rows={2} placeholder="Describe IP concerns or special terms"/></div>}</F>
+  </>;
+}
+
+function Step5({a}) {
+  const {tier,triggers,irbRequired,irbLikely,studyPath}=scoreHSRC(a);
+  const t=TIERS[tier];
+  const irbStatus=irbRequired?"Required":irbLikely?"Likely required":"Not triggered by current answers";
+  const irbColor=irbRequired?"#C0392B":irbLikely?"#E67E22":"#4CAF7D";
+  const nextSteps=["Submit HSRC intake for official category designation and written determination",tier>=2&&"Draft protocol using applicable tier sections of the Oura Research Protocol Template",(irbRequired||irbLikely)&&`Engage Legal / Regulatory for IRB strategy — ${tier===4?"WCG or Advarra IRB required":"WCG or Advarra preferred unless partner institution IRB applies"}`,tier>=3&&"Initiate MCA / SOW review with Legal; confirm IP and data ownership terms before partner engagement",tier>=4&&"Register study on ClinicalTrials.gov before participant contact",tier>=4&&"Draft Statistical Analysis Plan (SAP); finalize and lock before analysis begins",tier>=4&&"Prepare IRB package: protocol + ICF + questionnaires/CRFs + recruitment materials",tier>=4&&"Confirm consent modality (wet ink vs. digital) with site at time of IRB submission",a.ouraDevices?.includes("prototype")&&"Coordinate prototype chain-of-custody, inventory log, and camera-monitored storage with Device Ops",a.dxaOrRadiation==="yes"&&"Confirm radiation procedure contraindication screening and calibration SOPs with partner site",a.preVisitRequirements==="yes"&&"Define pre-visit restriction protocol and document medical exclusions for at-risk participants",tier<=2&&!irbRequired&&"Lightweight protocol sign-off by DRI; follow Internal Testing Policy consent requirements"].filter(Boolean);
+  return <>
+    <div style={{background:"#F4F7FB",borderRadius:10,padding:"10px 14px",marginBottom:18,fontSize:13,color:"#5A7184",lineHeight:1.5}}>Computed from your answers. This is a decision-support tool — the HSRC Chair makes the official determination.</div>
+    <div style={{background:t.bg,border:`2px solid ${t.border}`,borderRadius:12,padding:"16px 20px",marginBottom:14}}><div style={{fontSize:10,fontWeight:700,color:t.color,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>STUDY TIER</div><div style={{fontSize:18,fontWeight:700,color:"#1A2E4A",marginBottom:4}}>{t.label}</div><div style={{fontSize:12,color:"#7A94A8"}}>Protocol: {t.pages} · HSRC: {t.hsrc}</div></div>
+    <div style={{background:"white",border:`1.5px solid ${irbColor}44`,borderRadius:12,padding:"14px 18px",marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}><div style={{fontSize:10,fontWeight:700,color:"#7A94A8",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:8}}>IRB REQUIRED?</div><Tag label={irbStatus} color={irbColor}/></div>
+    <div style={{background:"white",borderRadius:12,padding:"14px 18px",marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}><div style={{fontSize:10,fontWeight:700,color:"#7A94A8",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:10}}>IRB TRIGGERS FLAGGED</div>{triggers.length===0?<div style={{fontSize:13,color:"#4CAF7D",fontWeight:500}}>✓ No IRB triggers detected</div>:triggers.map((tr,i)=><div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:8}}><span style={{color:tr.sev==="high"?"#C0392B":"#E67E22",fontSize:13,lineHeight:1.5,flexShrink:0}}>⚠</span><span style={{fontSize:13,color:"#1A2E4A",lineHeight:1.5}}>{tr.label}</span></div>)}</div>
+    <div style={{background:"white",borderRadius:12,padding:"14px 18px",marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}><div style={{fontSize:10,fontWeight:700,color:"#7A94A8",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>RECOMMENDED STUDY PATH</div><div style={{fontSize:14,color:"#1A2E4A",fontWeight:500}}>{studyPath}</div></div>
+    <div style={{background:"#1A2E4A",borderRadius:12,padding:"16px 20px"}}><div style={{fontSize:10,fontWeight:700,color:"#7BA7C7",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:12}}>IMMEDIATE NEXT STEPS</div>{nextSteps.map((item,i)=><div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:8}}><span style={{color:"#4CAF7D",fontWeight:700,fontSize:13,lineHeight:1.5,flexShrink:0}}>{i+1}.</span><span style={{fontSize:13,color:"#C8D8E8",lineHeight:1.5}}>{item}</span></div>)}</div>
+  </>;
+}
+
+function Step6({a,onReset,onEdit}) {
+  const scoring=scoreHSRC(a);
+  const {tier,irbRequired,irbLikely}=scoring;
+  const t=TIERS[tier];
+  const [status,setStatus]=useState("idle");
+  const [progress,setProgress]=useState("");
+  const [result,setResult]=useState({});
+  const [error,setError]=useState("");
+
+  const handleSubmit=async()=>{
+    setStatus("submitting");setError("");
+    try {
+      setProgress("Submitting intake and generating protocol...");
+      const res = await submitIntake(a, scoring);
+      setResult(res);
+      setStatus("done");
+    } catch(e) {
+      setError(e.message||"Submission failed. Please try again.");
+      setStatus("error");
+    }
+  };
+
+  const rows=[["Study Title",a.studyTitle],["DRI",a.dri],["Department",a.department],["Program",a.program],["Sites",a.numSites],["Study Design",a.studyDesign],["Study Type",a.studyType],["Sample Audience",a.sampleAudience],["Target N",a.sampleSize],["Countries",a.countries],["Oura Devices",(a.ouraDevices||[]).join(", ")],a.prototypeDetails&&["Prototype Details",a.prototypeDetails],["Reference Devices",a.referenceDevices==="yes"?(a.referenceDeviceDetails||"Yes"):a.referenceDevices==="no"?"No":"TBD"],a.specialCohorts?.length&&["Special Cohorts",a.specialCohorts.join(", ")],["External Partners",a.externalPartners==="yes"?(a.externalPartnerDetail||"Yes"):a.externalPartners==="no"?"No":"—"],["Sensitive Data",a.sensitiveData],["Pre-Visit Requirements",a.preVisitRequirements],["Radiation Procedures",a.dxaOrRadiation],["Activities Beyond Product Use",a.activitiesBeyondNormal],["Regulatory Evidence Intent",a.regulatoryEvidence],["Algorithm Validation",a.algValidation],["Greater Than Minimal Risk",a.greaterThanMinimalRisk],["IP Concerns",a.ipConcerns]].filter(Boolean).filter(([,v])=>v&&v!==""&&v!==undefined);
+
+  if (status==="submitting") return (
+    <div style={{textAlign:"center",padding:"48px 24px"}}>
+      <div style={{fontSize:32,marginBottom:16}}>⏳</div>
+      <div style={{fontSize:16,fontWeight:600,color:"#1A2E4A",marginBottom:8}}>Submitting intake...</div>
+      <div style={{fontSize:13,color:"#8AA0B0"}}>{progress}</div>
+    </div>
+  );
+
+  if (status==="error") return (
+    <div style={{textAlign:"center",padding:"32px 24px"}}>
+      <div style={{fontSize:32,marginBottom:12}}>⚠️</div>
+      <div style={{fontSize:16,fontWeight:600,color:"#C0392B",marginBottom:8}}>Submission error</div>
+      <div style={{fontSize:13,color:"#5A7184",marginBottom:24}}>{error}</div>
+      <button onClick={()=>setStatus("idle")} style={{padding:"9px 22px",borderRadius:8,border:"1.5px solid #D1DCE8",background:"white",color:"#5A7184",fontSize:13,fontWeight:600,cursor:"pointer"}}>← Try Again</button>
+    </div>
+  );
+
+  if (status==="done") {
+    const {jiraKey,jiraUrl,docUrl,docTitle}=result;
+    return (
+      <div>
+        <div style={{textAlign:"center",padding:"24px 0 20px"}}>
+          <div style={{fontSize:40,marginBottom:10}}>✅</div>
+          <div style={{fontSize:20,fontWeight:700,color:"#1A2E4A",marginBottom:4}}>Intake submitted</div>
+          <div style={{fontSize:13,color:"#8AA0B0"}}>Protocol stub and Jira ticket have been created.</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:24}}>
+          {jiraKey ? (
+            <a href={jiraUrl} target="_blank" rel="noopener noreferrer" style={{display:"flex",alignItems:"center",gap:14,background:"white",borderRadius:12,padding:"16px 20px",boxShadow:"0 2px 8px rgba(0,0,0,0.08)",border:"1.5px solid #E2E8F0",textDecoration:"none",color:"inherit"}}>
+              <div style={{width:40,height:40,borderRadius:10,background:"#0052CC",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{color:"white",fontSize:16,fontWeight:700}}>J</span></div>
+              <div><div style={{fontSize:11,fontWeight:700,color:"#8AA0B0",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:2}}>Jira Story · SCIE</div><div style={{fontSize:14,fontWeight:600,color:"#1A2E4A"}}>{jiraKey} — {a.studyTitle||"New Study"}</div><div style={{fontSize:12,color:"#1A6FA8",marginTop:2}}>{jiraUrl}</div></div>
+              <div style={{marginLeft:"auto",fontSize:18,color:"#8AA0B0"}}>↗</div>
+            </a>
+          ) : (
+            <div style={{background:"#FFF8F0",border:"1.5px solid #F5CBA7",borderRadius:12,padding:"14px 18px",fontSize:13,color:"#7D6608"}}>Jira ticket could not be created automatically. Create it manually in SCIE linked to SCIE-5201.</div>
+          )}
+          {docUrl ? (
+            <a href={docUrl} target="_blank" rel="noopener noreferrer" style={{display:"flex",alignItems:"center",gap:14,background:"white",borderRadius:12,padding:"16px 20px",boxShadow:"0 2px 8px rgba(0,0,0,0.08)",border:"1.5px solid #E2E8F0",textDecoration:"none",color:"inherit"}}>
+              <div style={{width:40,height:40,borderRadius:10,background:"#1A73E8",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{color:"white",fontSize:16,fontWeight:700}}>D</span></div>
+              <div><div style={{fontSize:11,fontWeight:700,color:"#8AA0B0",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:2}}>Google Doc · {DRIVE_FOLDER_NAME}</div><div style={{fontSize:14,fontWeight:600,color:"#1A2E4A"}}>{docTitle}</div><div style={{fontSize:12,color:"#1A6FA8",marginTop:2}}>{docUrl}</div></div>
+              <div style={{marginLeft:"auto",fontSize:18,color:"#8AA0B0"}}>↗</div>
+            </a>
+          ) : (
+            <div style={{background:"#FFF8F0",border:"1.5px solid #F5CBA7",borderRadius:12,padding:"14px 18px",fontSize:13,color:"#7D6608"}}>Google Doc could not be created automatically. See protocol content in the Jira ticket description.</div>
+          )}
+        </div>
+        <div style={{textAlign:"center"}}><button onClick={onReset} style={{padding:"10px 28px",borderRadius:8,border:"1.5px solid #D1DCE8",background:"white",color:"#5A7184",fontSize:13,fontWeight:500,cursor:"pointer"}}>Start New Intake</button></div>
+      </div>
+    );
+  }
+
+  // Idle — review screen
+  return <>
+    <div style={{background:t.bg,border:`2px solid ${t.border}`,borderRadius:12,padding:"16px 20px",marginBottom:18}}>
+      <div style={{fontSize:10,fontWeight:700,color:t.color,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>READY TO SUBMIT</div>
+      <div style={{fontSize:18,fontWeight:700,color:"#1A2E4A",marginBottom:8}}>{t.label}</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <Tag label={`HSRC: ${t.hsrc}`} color={t.color}/>
+        <Tag label={`IRB: ${irbRequired?"Required":irbLikely?"Likely required":"Not triggered"}`} color={irbRequired?"#C0392B":irbLikely?"#E67E22":"#4CAF7D"}/>
+        <Tag label={`Protocol: ${t.pages}`} color="#5A7184"/>
+      </div>
+    </div>
+    {a.studyOverview&&<div style={{background:"white",borderRadius:12,padding:"14px 18px",marginBottom:16,boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}><div style={{fontSize:10,fontWeight:700,color:"#7A94A8",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:8}}>STUDY OVERVIEW</div><div style={{fontSize:14,color:"#1A2E4A",lineHeight:1.6}}>{a.studyOverview}</div></div>}
+    <div style={{background:"white",borderRadius:12,padding:"14px 18px",marginBottom:20,boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}><div style={{fontSize:10,fontWeight:700,color:"#7A94A8",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:14}}>INTAKE SUMMARY</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px 24px"}}>{rows.map(([lbl,val])=><div key={lbl}><div style={{fontSize:10,color:"#8AA0B0",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:2}}>{lbl}</div><div style={{fontSize:13,color:"#1A2E4A",fontWeight:500}}>{String(val)}</div></div>)}</div></div>
+    <div style={{background:"#EBF5FB",border:"1.5px solid #BDD8EE",borderRadius:12,padding:"14px 18px",marginBottom:20,fontSize:13,color:"#1A2E4A",lineHeight:1.6}}>
+      <div style={{fontWeight:700,marginBottom:6,fontSize:12,textTransform:"uppercase",letterSpacing:"0.05em",color:"#1A6FA8"}}>On submit, this will:</div>
+      <div>① Generate a protocol stub and save it as a Google Doc in <strong>{DRIVE_FOLDER_NAME}</strong></div>
+      <div>② Create a Jira Story in <strong>SCIE</strong> linked to epic <strong>{JIRA_EPIC}</strong>, with study metadata and a link to the doc</div>
+    </div>
+    <div style={{display:"flex",gap:12,justifyContent:"center"}}>
+      <button onClick={onEdit} style={{padding:"10px 28px",borderRadius:8,border:"1.5px solid #D1DCE8",background:"white",color:"#5A7184",fontSize:13,fontWeight:500,cursor:"pointer"}}>← Edit Intake</button>
+      <button onClick={handleSubmit} style={{padding:"10px 32px",borderRadius:8,border:"none",background:"#1A2E4A",color:"white",fontSize:14,fontWeight:700,cursor:"pointer",boxShadow:"0 2px 8px rgba(26,46,74,0.25)"}}>Submit &amp; Create Jira + Doc →</button>
+    </div>
+  </>;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+const STEPS=[{id:"basics",label:"Basic info"},{id:"purpose",label:"Purpose"},{id:"methods",label:"Methods"},{id:"riskflags",label:"Risk flags"},{id:"assessment",label:"Assessment"},{id:"submit",label:"Submit"}];
+const TITLES=[["Basic information","Core identifiers for this study request."],["Study purpose & scope","Your answers here drive the HSRC trigger scoring on Step 5."],["Study methods","High-level design details used to pre-fill the protocol template."],["Risk flags & compliance","Your answers auto-score IRB triggers on the next screen."],["HSRC auto-assessment",null],["Review & submit",null]];
+
+function App() {
+  const [step,setStep]=useState(0);
+  const [answers,setAnswers]=useState({});
+  const set=(k,v)=>setAnswers(p=>({...p,[k]:v}));
+  const {tier}=scoreHSRC(answers);
+  const hasAnswers=Object.keys(answers).length>0;
+  const content=[<Step1 a={answers} set={set}/>,<Step2 a={answers} set={set}/>,<Step3 a={answers} set={set}/>,<Step4 a={answers} set={set}/>,<Step5 a={answers}/>,<Step6 a={answers} onReset={()=>{setAnswers({});setStep(0);}} onEdit={()=>setStep(0)}/>];
+
+  return (
+    <div style={{fontFamily:"sans-serif",minHeight:"100vh",background:"#F4F7FB"}}>
+      <div style={{background:"#1A2E4A",padding:"14px 28px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:26,height:26,borderRadius:"50%",background:"white",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:14}}>⭕</span></div>
+          <div><div style={{color:"white",fontWeight:600,fontSize:14,letterSpacing:"0.04em"}}>Oura Research Study Intake</div><div style={{color:"#7BA7C7",fontWeight:300,fontSize:10,letterSpacing:"0.1em",textTransform:"uppercase",marginTop:1}}>HSRC INTAKE · CONFIDENTIAL</div></div>
+        </div>
+        <div style={{color:"#7BA7C7",fontSize:11}}>Internal use only · ouraring.com</div>
+      </div>
+      <div style={{height:3,background:"#D6E4F0"}}><div style={{height:"100%",width:`${(step/(STEPS.length-1))*100}%`,background:"#1A6FA8",transition:"width 0.3s ease"}}/></div>
+      <div style={{background:"white",borderBottom:"1px solid #EEF2F7",padding:"0 28px",display:"flex",overflowX:"auto"}}>
+        {STEPS.map((s,i)=>{const done=i<step;const active=i===step;return(
+          <button key={s.id} onClick={()=>setStep(i)} style={{display:"flex",alignItems:"center",gap:7,padding:"12px 12px",background:"none",border:"none",cursor:"pointer",borderBottom:active?"2px solid #1A6FA8":"2px solid transparent",marginBottom:-1,whiteSpace:"nowrap"}}>
+            <span style={{width:20,height:20,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,flexShrink:0,background:done?"#1A6FA8":active?"#1A2E4A":"#EAEFF4",color:done||active?"white":"#8AA0B0"}}>{done?"✓":i+1}</span>
+            <span style={{fontSize:12,fontWeight:active?700:500,color:active?"#1A2E4A":done?"#1A6FA8":"#8AA0B0"}}>{s.label}</span>
+          </button>
+        );})}
+      </div>
+      {hasAnswers&&step<5&&<div style={{maxWidth:680,margin:"14px auto 0",padding:"0 24px"}}><div style={{background:TIERS[tier].bg,border:`1.5px solid ${TIERS[tier].border}55`,borderRadius:8,padding:"7px 14px",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:13}}>🏷️</span><span style={{fontSize:12,fontWeight:600,color:TIERS[tier].color}}>{TIERS[tier].label}</span><span style={{fontSize:11,color:"#8AA0B0",marginLeft:"auto"}}>auto-classified · updates as you answer</span></div></div>}
+      <div style={{maxWidth:680,margin:"0 auto",padding:"22px 24px 48px"}}>
+        <div style={{marginBottom:20}}><h2 style={{margin:"0 0 4px",fontSize:20,color:"#1A2E4A",fontWeight:700}}>{TITLES[step][0]}</h2>{TITLES[step][1]&&<p style={{margin:0,fontSize:13,color:"#8AA0B0"}}>{TITLES[step][1]}</p>}</div>
+        <div style={{background:"white",borderRadius:14,padding:"26px 26px",boxShadow:"0 2px 12px rgba(0,0,0,0.07)"}}>{content[step]}</div>
+        {step<5&&<div style={{display:"flex",justifyContent:"space-between",marginTop:18}}>
+          <button onClick={()=>setStep(s=>Math.max(0,s-1))} disabled={step===0} style={{padding:"9px 22px",borderRadius:8,border:"1.5px solid #D1DCE8",background:step===0?"#F4F7FB":"white",color:step===0?"#C0CDD6":"#5A7184",fontSize:13,fontWeight:600,cursor:step===0?"default":"pointer"}}>← Back</button>
+          <button onClick={()=>setStep(s=>Math.min(STEPS.length-1,s+1))} style={{padding:"9px 26px",borderRadius:8,border:"none",background:step===4?"#4CAF7D":"#1A2E4A",color:"white",fontSize:13,fontWeight:600,cursor:"pointer",boxShadow:"0 2px 8px rgba(26,46,74,0.2)"}}>{step===4?"Confirm & continue →":"Next →"}</button>
+        </div>}
+        <div style={{textAlign:"center",marginTop:12,fontSize:11,color:"#A8BAC6"}}>Step {step+1} of {STEPS.length} · Oura Research HSRC Intake · Confidential</div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.render(<App/>, document.getElementById('root'));
+</script>
+</body>
+</html>
