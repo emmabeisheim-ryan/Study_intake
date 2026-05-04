@@ -145,7 +145,7 @@ function Step1({a,set}) {
     <F label="Study title" req><TI value={a.studyTitle} onChange={v=>set("studyTitle",v)} placeholder="e.g. Sleep Apnea Risk Overnight Validation"/></F>
     <F label="DRI (directly responsible individual)" req sub="Name and role — may be Research Ops, Health Science, Clinical Affairs, Sensing, or other team"><TI value={a.dri} onChange={v=>set("dri",v)} placeholder="e.g. Emma Beisheim-Ryan, Senior Research Scientist"/></F>
     <F label="Department / team" req><TI value={a.department} onChange={v=>set("department",v)} placeholder="e.g. Health Science, Sensing, Clinical Affairs, Research Ops"/></F>
-    <F label="Program / product line"><TI value={a.program} onChange={v=>set("program",v)} placeholder="e.g. Sleep, Body Composition, Activity, Sensing, Member Experience"/></F>
+    <F label="Program / product line"><TI value={a.program} onChange={v=>set("program",v)} placeholder="e.g. Sleep, Activity, Sensing, Member Experience"/></F>
     <F label="Anticipated number of study sites"><Sel value={a.numSites} onChange={v=>set("numSites",v)} options={["1 (single site)","2–3 sites","4+ sites","Not yet determined"]}/></F>
   </>;
 }
